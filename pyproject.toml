@@ -1,0 +1,24 @@
+[project]
+name = "owci"
+version = "0.1.0"
+description = "Schedule OpenWrt firmware tests on the OpenWrt CI labs (KernelCI)"
+readme = "README.md"
+authors = [
+    { name = "Paul Spooren", email = "mail@aparcar.org" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    # KernelCI's own API and storage clients (kci), at the revision the
+    # OpenWrt CI server runs (openwrtci_sources in the openwrtci repository)
+    "kernelci @ git+https://github.com/kernelci/kernelci-core.git@f9f66472921ace26d7f315e450969be25aa8588b",
+    "click",
+    "pyyaml",
+    "requests",
+]
+
+[project.scripts]
+owci = "owci.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.21,<0.14.0"]
+build-backend = "uv_build"
