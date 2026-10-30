@@ -22,6 +22,11 @@ class JobError(Exception):
     """A job cannot be created (missing image, API or download failure)."""
 
 
+class NothingToTest(JobError):
+    """No image to test: the release doesn't build the device, or the device
+    is only tested on snapshots (schedule.py counts these separately)."""
+
+
 # --- releases --------------------------------------------------------------------
 
 
@@ -92,6 +97,8 @@ def device_info(tests: str, device: str) -> dict:
         "profile": meta["profile"],
         "image": meta.get("image") or {},
         "features": ((data.get("targets") or {}).get("main") or {}).get("features") or [],
+        # only tested on snapshots (e.g. no image in releases yet)
+        "snapshots_only": bool(meta.get("snapshots_only")),
     }
 
 
@@ -117,19 +124,21 @@ def profiles_json(release: str, target: str) -> dict | None:
 def resolve_official(tests: str, release: str, device: str) -> dict:
     """The device's image in a release (same choice as healthcheck.sh)."""
     info = device_info(tests, device)
+    if info["snapshots_only"] and not is_snapshot(release):
+        raise NothingToTest(f"{device} is only tested on snapshots")
     image_type = info["image"].get("type", "kernel")
     image_fs = info["image"].get("filesystem")
     profiles = profiles_json(release, info["target"])
     if profiles is None:
-        raise JobError(f"{release} has no target {info['target']}")
+        raise NothingToTest(f"{release} has no target {info['target']}")
     profile = profiles["profiles"].get(info["profile"])
     if profile is None:
-        raise JobError(f"{release} {info['target']} has no profile {info['profile']}")
+        raise NothingToTest(f"{release} {info['target']} has no profile {info['profile']}")
     for image in profile["images"]:
         if image["type"] == image_type and (not image_fs or image["filesystem"] == image_fs):
             break
     else:
-        raise JobError(f"no {image_type}/{image_fs} image for {device} in {release}")
+        raise NothingToTest(f"no {image_type}/{image_fs} image for {device} in {release}")
     return {
         **info,
         "release": release,
@@ -178,9 +187,14 @@ def release_commit(release: str) -> str:
     return out[0]
 
 
-def official_revision(fw: dict) -> dict:
+def official_revision(fw: dict, known_commit: str | None = None) -> dict:
+    """known_commit: the build's commit if Maestro has it already (snapshot
+    commits otherwise come from GitHub, 60 requests/hour without a token)."""
     release = fw["release"]
-    commit = snapshot_commit(fw["version_code"]) if is_snapshot(release) else release_commit(release)
+    if known_commit:
+        commit = known_commit
+    else:
+        commit = snapshot_commit(fw["version_code"]) if is_snapshot(release) else release_commit(release)
     if is_snapshot(release):
         describe, tags = fw["version_code"], []
     else:

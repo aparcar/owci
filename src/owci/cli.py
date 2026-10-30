@@ -3,7 +3,7 @@
   owci schedule --device openwrt_one                        # main snapshot
   owci schedule --device openwrt_one --release 25.12.6 --lab aparcar
   owci schedule --device openwrt_one --firmware ./openwrt-...-initramfs.itb \\
-      --title "mt76: fix 160 MHz" --commit <sha> --wait
+      --title "mt76: fix 160 MHz" --url <pull request> --commit <sha> --wait
   owci status <job id>
 
 Settings and tokens come from kci's kernelci.toml (see settings.py).
@@ -17,8 +17,8 @@ import time
 import click
 
 from . import firmware, settings as settings_mod
-from .firmware import JobError
-from .jobs import Backend, schedule as create_jobs
+from .firmware import JobError, NothingToTest
+from .jobs import Backend, existing_job, schedule as create_jobs, trigger
 
 POLL_S = 30
 
@@ -37,37 +37,60 @@ def cli(ctx, settings_path):
 @click.option("--release", default="SNAPSHOT", show_default=True,
               help="official build: SNAPSHOT (main), 25.12-SNAPSHOT (branch) or 25.12.6 (release)")
 @click.option("--firmware", "image", help="custom image instead: a local file or URL (uploaded)")
-@click.option("--title", help="custom image: what it is, e.g. the change it tests")
 @click.option("--repo", help="custom image: source repository URL")
 @click.option("--branch", help="custom image: source branch")
 @click.option("--commit", help="custom image: full source commit hash")
+@click.option("--title", help="why: what the run tests, e.g. the change (shown in the web UI)")
+@click.option("--url", help="a link for it, e.g. the pull request (default on GitHub Actions: the run)")
 @click.option("--lab", help="only this lab may run it (default: any lab with the device)")
 @click.option("--tests", default="", help="pytest selection, e.g. test_base.py (default: all)")
+@click.option("--skip-existing", is_flag=True,
+              help="do nothing if you already have a job for this device and build")
+@click.option("--dry-run", is_flag=True, help="only show what would be scheduled")
 @click.option("--wait", is_flag=True, help="wait for the result; exit 1 unless it passes")
 @click.pass_obj
-def schedule_cmd(settings_path, device, release, image, title, repo, branch, commit, lab,
-                 tests, wait):
-    """Schedule a test run of one device."""
+def schedule_cmd(settings_path, device, release, image, repo, branch, commit, title, url, lab,
+                 tests, skip_existing, dry_run, wait):
+    """Schedule a test run of one device.
+
+    The last line says what happened: "created <job id>", "exists <job id>"
+    or "would create". Exit 0 then, 2 if there is nothing to test (no image
+    in that release, device only tested on snapshots), 1 on errors.
+    """
     s = settings_mod.load(settings_path)
     backend = Backend(s)
     try:
         if image:
             fw = firmware.resolve_custom(s.tests, device, image)
             rev = firmware.custom_revision(fw, repo, branch, commit)
-            extra = {"source": "custom", **({"title": title} if title else {})}
+            extra = {"source": "custom"}
         else:
-            if any((title, repo, branch, commit)):
-                raise click.UsageError("--title/--repo/--branch/--commit describe a custom --firmware")
+            if any((repo, branch, commit)):
+                raise click.UsageError("--repo/--branch/--commit describe a custom --firmware")
             fw = firmware.resolve_official(s.tests, release, device)
-            rev = firmware.official_revision(fw)
+            # snapshot commits: Maestro first (GitHub allows 60 lookups/hour)
+            known = backend.find_one(kind="checkout",
+                                     **{"data.kernel_revision.describe": fw["version_code"]})
+            rev = firmware.official_revision(fw, known and known["data"]["kernel_revision"]["commit"])
             extra = {}
+        trig = trigger(title, url)
         click.echo(f"owci: {fw['name']} ({device}) · {rev['describe']}"
                    + (f" · {title}" if title else ""))
-        job = create_jobs(backend, fw, rev, device, runtime=lab or s.pool, tests=tests, extra=extra)
+        if skip_existing and (job := existing_job(backend, device, rev["commit"])):
+            click.echo(f"exists {job['id']} ({job['state']})")
+            return
+        if dry_run:
+            click.echo(f"would create ({fw['version_code']})")
+            return
+        job = create_jobs(backend, fw, rev, device, runtime=lab or s.pool, tests=tests,
+                          extra=extra, trig=trig)
+    except NothingToTest as e:
+        click.echo(f"nothing to test: {e}")
+        sys.exit(2)
     except JobError as e:
         sys.exit(f"owci: {e}")
-    click.echo(f"  job      {job['id']} (waiting for {'lab ' + lab if lab else 'a lab with the device'})")
-    click.echo(f"\n  {result_url(s, job['id'])}")
+    click.echo(f"  {result_url(s, job['id'])}")
+    click.echo(f"created {job['id']} (waiting for {'lab ' + lab if lab else 'a lab with the device'})")
     if wait:
         sys.exit(wait_for(backend, s, job["id"]))
 

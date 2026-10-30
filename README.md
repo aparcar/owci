@@ -11,9 +11,18 @@ uv tool install git+https://github.com/aparcar/owci    # or: uv run owci ... in 
 owci schedule --device openwrt_one                     # main snapshot, any lab with the device
 owci schedule --device openwrt_one --release 25.12.6 --lab aparcar-lab --tests test_base.py
 owci schedule --device openwrt_one --firmware ./openwrt-...-initramfs.itb \
-    --title "mt76: fix 160 MHz" --commit <sha> --wait  # your own image; exit 0 if it passed
+    --title "mt76: fix 160 MHz" --url <pull request> --commit <sha> --wait
+                                                       # your own image; exit 0 if it passed
 owci status <job id> [--wait]
 ```
+
+`--title` and `--url` say why a run exists; the web UI shows them (on GitHub
+Actions the url defaults to the workflow run). Runs show as "manual · <you>";
+only the nightly schedule's runs (the `ci` user) count as official results.
+`--skip-existing` does nothing if you already have a job for that device and
+build, `--dry-run` only shows what would be created. Exit codes: 0 (created,
+exists, would create), 2 (nothing to test: no image in that release, or the
+device is only tested on snapshots), 1 (errors).
 
 The web UI shows the matching command on each device page ("Schedule a run")
 and run page ("Run again").
