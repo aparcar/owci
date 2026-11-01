@@ -19,6 +19,7 @@ import json
 import os
 import re
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import kernelci.api
@@ -41,17 +42,25 @@ class Backend:
             api_url=storage_url, name="owci", storage_type="backend", base_url=storage_url)
         self.storage = kernelci.storage.get_storage(storage_config, f"Bearer {settings.storage_token}")
         self.settings = settings
-        self._user = None
+        self._whoami = None
+
+    @property
+    def whoami(self) -> dict:
+        if self._whoami is None:
+            try:
+                self._whoami = self.api.user.whoami()
+            except Exception as e:
+                raise JobError(f"API: who am I: {e}") from e
+        return self._whoami
 
     @property
     def user(self) -> str:
         """The Maestro user of the token (owner of the nodes we create)."""
-        if self._user is None:
-            try:
-                self._user = self.api.user.whoami()["username"]
-            except Exception as e:
-                raise JobError(f"API: who am I: {e}") from e
-        return self._user
+        return self.whoami["username"]
+
+    @property
+    def is_admin(self) -> bool:
+        return bool(self.whoami.get("is_superuser"))
 
     def upload(self, local: Path, dest_dir: str, name: str | None = None) -> str:
         """Upload below the settings' storage_prefix (submitters may only
@@ -113,6 +122,31 @@ def existing_job(backend: Backend, device: str, commit: str) -> dict | None:
     """The user's job for this device and commit, if any."""
     return backend.find_one(kind="job", name="openwrt-tests", owner=backend.user,
                             **{"data.platform": device, "data.kernel_revision.commit": commit})
+
+
+def discard(backend: Backend, job_id: str, reason: str | None) -> dict:
+    """Mark a job as not counting (data.misc.discarded: reason, by, at), e.g.
+    after a hardware fault; the web UI hides it. reason None: undo. Only
+    admins and the job's owner (who scheduled it) may; Maestro checks it too."""
+    try:
+        job = backend.get(job_id)
+    except Exception as e:
+        raise JobError(f"API: getting {job_id}: {e}") from e
+    if job.get("kind") != "job":
+        raise JobError(f"{job_id} is a {job.get('kind')} node, not a run (job)")
+    if not backend.is_admin and job.get("owner") != backend.user:
+        raise JobError(f"{job_id} was scheduled by {job.get('owner')}: only they or an admin "
+                       f"may discard it (you are {backend.user})")
+    data = job.setdefault("data", {})
+    # misc: the scheduler's and lab's keys stay (deploy/DATA.md)
+    misc = data.get("misc") or {}
+    if reason is None:
+        misc.pop("discarded", None)
+    else:
+        misc["discarded"] = {"reason": reason, "by": backend.user,
+                             "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    data["misc"] = misc
+    return backend.update(job)
 
 
 def schedule(backend: Backend, fw: dict, rev: dict, device: str, *, runtime: str,
@@ -189,6 +223,16 @@ def schedule(backend: Backend, fw: dict, rev: dict, device: str, *, runtime: str
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / f"{job['id']}.json"
         path.write_text(json.dumps(job_def, indent=2))
-        job["artifacts"] = {"job_definition": backend.upload(path, "openwrt/jobs")}
+        try:
+            job["artifacts"] = {"job_definition": backend.upload(path, "openwrt/jobs")}
+        except JobError:
+            # no lab can run it: close it, or it times out as an incomplete
+            # (and, for ci, official) result
+            job.update(state="done", result="incomplete")
+            job["data"]["misc"]["discarded"] = {
+                "reason": "scheduling failed: job definition upload", "by": backend.user,
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            backend.update(job)
+            raise
     job["state"] = "available"
     return backend.update(job)

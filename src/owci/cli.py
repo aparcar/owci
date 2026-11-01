@@ -5,6 +5,7 @@
   owci schedule --device openwrt_one --firmware ./openwrt-...-initramfs.itb \\
       --title "mt76: fix 160 MHz" --url <pull request> --commit <sha> --wait
   owci status <job id>
+  owci discard <job id> --reason "lab: broken power supply"
 
 Settings and tokens come from kci's kernelci.toml (see settings.py).
 """
@@ -18,7 +19,7 @@ import click
 
 from . import firmware, settings as settings_mod
 from .firmware import JobError, NothingToTest
-from .jobs import Backend, existing_job, schedule as create_jobs, trigger
+from .jobs import Backend, discard as discard_job, existing_job, schedule as create_jobs, trigger
 
 POLL_S = 30
 
@@ -106,6 +107,29 @@ def status(settings_path, job_id, wait):
     if wait:
         sys.exit(wait_for(backend, s, job_id))
     sys.exit(report(s, backend.get(job_id)))
+
+
+@cli.command()
+@click.argument("job_id")
+@click.option("--reason", help="why it doesn't count, e.g. \"lab: broken power supply\" (required)")
+@click.option("--undo", is_flag=True, help="show the run again")
+@click.pass_obj
+def discard(settings_path, job_id, reason, undo):
+    """Hide a run from the web UI, e.g. one that failed on a hardware fault.
+
+    The run stays in Maestro (and its page, marked as discarded); only the
+    admins and whoever scheduled it may discard it.
+    """
+    if not undo and not reason:
+        raise click.UsageError("--reason is required")
+    s = settings_mod.load(settings_path)
+    backend = Backend(s)
+    try:
+        job = discard_job(backend, job_id, None if undo else reason)
+    except JobError as e:
+        sys.exit(f"owci: {e}")
+    click.echo(f"{'restored' if undo else 'discarded'} {job['id']}")
+    click.echo(f"  {result_url(s, job['id'])}")
 
 
 def wait_for(backend: Backend, s, job_id: str) -> int:
