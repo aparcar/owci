@@ -15,12 +15,16 @@ owci schedule --device openwrt_one --firmware ./openwrt-...-initramfs.itb \
                                                        # your own image; exit 0 if it passed
 owci status <job id> [--wait]
 owci discard <job id> --reason "lab: broken power supply"   # hide it; --undo shows it again
+owci discard <job id> --reason "..." --reschedule [--wait]  # and run it again
 ```
 
 `discard` is for runs that failed on a hardware fault, not the firmware: the
 web UI leaves them out of the device overview, device and lab pages (the run's
 own page stays, marked as discarded). Only the admins and whoever scheduled
 the run may discard it. It doesn't take back what was already sent to KCIDB.
+`--reschedule` then creates a new run of the same build, device and tests
+(`data.misc.rerun_of`: the discarded one), back in the pool the lab claimed it
+from (or pinned to its lab, as before); `--wait` waits for its result.
 
 `--title` and `--url` say why a run exists; the web UI shows them (on GitHub
 Actions the url defaults to the workflow run). Runs show as "manual · <you>";

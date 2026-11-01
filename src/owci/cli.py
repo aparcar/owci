@@ -5,7 +5,7 @@
   owci schedule --device openwrt_one --firmware ./openwrt-...-initramfs.itb \\
       --title "mt76: fix 160 MHz" --url <pull request> --commit <sha> --wait
   owci status <job id>
-  owci discard <job id> --reason "lab: broken power supply"
+  owci discard <job id> --reason "lab: broken power supply" [--reschedule]
 
 Settings and tokens come from kci's kernelci.toml (see settings.py).
 """
@@ -19,7 +19,8 @@ import click
 
 from . import firmware, settings as settings_mod
 from .firmware import JobError, NothingToTest
-from .jobs import Backend, discard as discard_job, existing_job, schedule as create_jobs, trigger
+from .jobs import (Backend, discard as discard_job, existing_job, reschedule as reschedule_job,
+                   schedule as create_jobs, trigger)
 
 POLL_S = 30
 
@@ -113,8 +114,11 @@ def status(settings_path, job_id, wait):
 @click.argument("job_id")
 @click.option("--reason", help="why it doesn't count, e.g. \"lab: broken power supply\" (required)")
 @click.option("--undo", is_flag=True, help="show the run again")
+@click.option("--reschedule", is_flag=True,
+              help="schedule it again: same build, device and tests, back to its pool or lab")
+@click.option("--wait", is_flag=True, help="with --reschedule: wait for the new run's result")
 @click.pass_obj
-def discard(settings_path, job_id, reason, undo):
+def discard(settings_path, job_id, reason, undo, reschedule, wait):
     """Hide a run from the web UI, e.g. one that failed on a hardware fault.
 
     The run stays in Maestro (and its page, marked as discarded); only the
@@ -122,14 +126,24 @@ def discard(settings_path, job_id, reason, undo):
     """
     if not undo and not reason:
         raise click.UsageError("--reason is required")
+    if undo and reschedule:
+        raise click.UsageError("--undo and --reschedule don't go together")
+    if wait and not reschedule:
+        raise click.UsageError("--wait needs --reschedule")
     s = settings_mod.load(settings_path)
     backend = Backend(s)
     try:
         job = discard_job(backend, job_id, None if undo else reason)
+        click.echo(f"{'restored' if undo else 'discarded'} {job['id']}")
+        click.echo(f"  {result_url(s, job['id'])}")
+        if reschedule:
+            new = reschedule_job(backend, job)
+            click.echo(f"  {result_url(s, new['id'])}")
+            click.echo(f"created {new['id']} (waiting for {new['data']['runtime']})")
     except JobError as e:
         sys.exit(f"owci: {e}")
-    click.echo(f"{'restored' if undo else 'discarded'} {job['id']}")
-    click.echo(f"  {result_url(s, job['id'])}")
+    if wait:
+        sys.exit(wait_for(backend, s, new["id"]))
 
 
 def wait_for(backend: Backend, s, job_id: str) -> int:

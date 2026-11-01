@@ -26,6 +26,7 @@ import kernelci.api
 import kernelci.config.api
 import kernelci.config.storage
 import kernelci.storage
+import requests
 
 from .firmware import JobError, download
 from .settings import Settings
@@ -198,28 +199,55 @@ def schedule(backend: Backend, fw: dict, rev: dict, device: str, *, runtime: str
         })
         print(f"  build    {build['id']} ({name}, {fw['version_code']})")
 
-    job = backend.add({
-        "kind": "job", "name": "openwrt-tests", "path": [*build["path"], "openwrt-tests"],
-        "parent": build["id"], "state": "running",
-        "data": {
-            "kernel_revision": rev,
-            "runtime": runtime,
-            "platform": device,
-            "arch": isa_arch(fw["arch_packages"]),
-            # the web UI takes device names and features from the jobs; in
-            # misc, see openwrtci's deploy/DATA.md
-            "misc": {"openwrt": {**meta, "profile": fw["profile"], "name": fw["name"],
-                                 "features": fw["features"]},
-                     "trigger": trig},
-        },
-    })
-    job_def = {
+    return add_job(backend, build["id"], [*build["path"], "openwrt-tests"], {
+        "kernel_revision": rev,
+        "runtime": runtime,
+        "platform": device,
+        "arch": isa_arch(fw["arch_packages"]),
+        # the web UI takes device names and features from the jobs; in
+        # misc, see openwrtci's deploy/DATA.md
+        "misc": {"openwrt": {**meta, "profile": fw["profile"], "name": fw["name"],
+                             "features": fw["features"]},
+                 "trigger": trig},
+    }, {
         "artifacts": {"firmware": build["artifacts"]["firmware"]},
         "integrity": {"sha256": {"firmware": fw["image"]["sha256"]}},
         "tests": [{"id": "openwrt-tests", "type": "pytest", "parameters": tests, "timeout_s": 1800}],
         "environment": {"platform": device, "arch": fw["arch_packages"],
                         "requirements": fw["features"]},
-    }
+    })
+
+
+def reschedule(backend: Backend, job: dict) -> dict:
+    """A new available job like `job` (same build, device, tests and trigger,
+    data.misc.rerun_of: its id), e.g. after discarding it. It goes back to the
+    pool the lab claimed it from, or to the lab it was pinned to."""
+    data = job.get("data") or {}
+    misc = data.get("misc") or {}
+    url = (job.get("artifacts") or {}).get("job_definition")
+    if not url:
+        raise JobError(f"{job['id']} has no job definition to run again")
+    try:
+        res = requests.get(url, timeout=30)
+        res.raise_for_status()
+        job_def = res.json()
+    except (requests.RequestException, ValueError) as e:
+        raise JobError(f"job definition {url}: {e}") from e
+    return add_job(backend, job["parent"], job["path"], {
+        "kernel_revision": data["kernel_revision"],
+        "runtime": misc.get("pool") or data["runtime"],
+        "platform": data["platform"],
+        "arch": data["arch"],
+        "misc": {"openwrt": misc.get("openwrt", {}), "trigger": misc.get("trigger", {}),
+                 "rerun_of": job["id"]},
+    }, job_def)
+
+
+def add_job(backend: Backend, parent: str, path: list[str], data: dict, job_def: dict) -> dict:
+    """A new job below the build `parent` and its job definition; available
+    once the definition is uploaded."""
+    job = backend.add({"kind": "job", "name": "openwrt-tests", "path": path,
+                       "parent": parent, "state": "running", "data": data})
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / f"{job['id']}.json"
         path.write_text(json.dumps(job_def, indent=2))
